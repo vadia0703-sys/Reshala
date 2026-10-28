@@ -28,6 +28,7 @@ ol{margin:0;padding-left:20px;color:#333;font-size:17px}li{margin:6px 0}
 .hide{display:none}
 </style></head><body><div class="w">
 <select id="cls"></select>
+<button id="aibtn" class="hide"></button>
 <div class="tabs"><button id="t1" class="on">Пример / задача</button><button id="t2">Геометрия</button></div>
 <div id="s1">
 <textarea id="inp" rows="2" placeholder="5+3×2, √16, 2(x+1)=10 или задача словами" autocomplete="off"></textarea>
@@ -418,11 +419,11 @@ async function ocr(file){
 
 /* ---------- ЭКРАН ---------- */
 /* ---------- ИИ (подключается в APK) ---------- */
-const AI_PROMPT='Ты помощник школьника. Преврати задачу в JSON и больше ничего не пиши.\nФорматы:\n{"t":"expr","v":"10-2*5"} — задача сводится к примеру (знаки + - * / ( ) ^ √)\n{"t":"eq","v":"2x+3=11"} — уравнение с неизвестной x\n{"t":"no"} — если так записать нельзя\nЗадача: ';
+const AI_PROMPT='Ты переводишь школьные задачи в JSON. Ответ — только одна строка JSON.\nФорматы:\n{"t":"expr","v":"пример"} — если задача решается примером (знаки + - * / ( ) ^ √)\n{"t":"eq","v":"уравнение"} — если нужно найти x\n{"t":"no"} — если непонятно\nПримеры:\nЗадача: У Маши было 20 рублей, она купила 3 конфеты по 4 рубля. Сколько рублей осталось?\n{"t":"expr","v":"20-3*4"}\nЗадача: Брат старше сестры в 3 раза, вместе им 24 года. Сколько лет сестре?\n{"t":"eq","v":"x+3x=24"}\nЗадача: Машина проехала 100 км за 2 часа, потом 150 км за 3 часа. Какая средняя скорость?\n{"t":"expr","v":"(100+150)/(2+3)"}\nЗадача: Задумали число, прибавили 5, умножили на 2, получили 30. Какое число?\n{"t":"eq","v":"2(x+5)=30"}\nЗадача: Цена 800 рублей, скидка 25%. Сколько стоит?\n{"t":"expr","v":"800*0.75"}\nЗадача: ';
 async function aiParse(text){
   if(typeof window==='undefined'||!window.AndroidAI||!window.AndroidAI.ask)return null;
   try{
-    const out=await new Promise(res=>{window.__aiDone=res;window.AndroidAI.ask(AI_PROMPT+text+'\nJSON:');});
+    const out=await new Promise(res=>{window.__aiDone=res;window.AndroidAI.ask(AI_PROMPT+text);});
     const m=String(out).match(/\{[\s\S]*?\}/);
     if(!m)return null;
     const o=JSON.parse(m[0]);
@@ -459,7 +460,9 @@ function init(){
   const go=async()=>{
     const raw=$('inp').value,c=+cls.value;
     let res=understand(raw,c);
-    if(res.err&&window.AndroidAI){
+    const ai=!!(window.AndroidAI&&AndroidAI.ready&&AndroidAI.ready());
+    if(res.err&&window.AndroidAI&&!ai)res.err+=' Нажмите «🤖 Подключить ИИ» вверху, и я смогу решать такие задачи.';
+    if(res.err&&ai){
       $('out').innerHTML='<div class="paper">🤖 Думаю…</div>';
       const o=await aiParse(raw);
       if(o){const r=solve(o.v,c);if(!r.err){r.said='ИИ понял так: '+esc(o.v);res=r;}}
@@ -493,6 +496,14 @@ function init(){
     $('out').innerHTML='';
   };
   $('t1').onclick=()=>tab(1);$('t2').onclick=()=>tab(2);
+  if(window.AndroidAI){
+    const b=$('aibtn');b.className='';
+    const upd=()=>{b.textContent=AndroidAI.ready()?'🤖 ИИ подключён':'🤖 Подключить ИИ (выбрать файл модели)';};
+    upd();
+    b.onclick=()=>{if(!AndroidAI.ready())AndroidAI.pickModel();};
+    window.__aiStatus=s=>{b.textContent='🤖 '+s;};
+    window.__aiReady=ok=>{upd();if(!ok)b.textContent='🤖 Не получилось, попробуйте ещё раз';};
+  }
 }
 if(typeof document!=='undefined')init();
 
