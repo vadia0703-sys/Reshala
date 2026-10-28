@@ -19,6 +19,11 @@ jobs:
         run: |
           mkdir -p app/src/main/java/ru/reshala/app app/src/main/assets
           cp reshala.html app/src/main/assets/index.html
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.suppressUnsupportedCompileSdk=35
+          org.gradle.jvmargs=-Xmx3g
+          EOF
           cat > settings.gradle <<'EOF'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
@@ -32,18 +37,22 @@ jobs:
           plugins { id 'com.android.application' }
           android {
             namespace 'ru.reshala.app'
-            compileSdk 34
+            compileSdk 35
             defaultConfig {
               applicationId 'ru.reshala.app'
               minSdk 24
               targetSdk 34
-              versionCode 1
-              versionName '1.0'
+              versionCode 2
+              versionName '2.0'
+              ndk { abiFilters 'arm64-v8a' }
             }
             compileOptions {
               sourceCompatibility JavaVersion.VERSION_17
               targetCompatibility JavaVersion.VERSION_17
             }
+          }
+          dependencies {
+            implementation 'com.google.mediapipe:tasks-genai:0.10.27'
           }
           EOF
           cat > app/src/main/AndroidManifest.xml <<'EOF'
@@ -52,7 +61,7 @@ jobs:
             <uses-permission android:name="android.permission.INTERNET"/>
             <uses-permission android:name="android.permission.CAMERA"/>
             <uses-permission android:name="android.permission.RECORD_AUDIO"/>
-            <application android:label="Решала" android:icon="@android:drawable/sym_def_app_icon" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+            <application android:label="Решала" android:largeHeap="true" android:icon="@android:drawable/sym_def_app_icon" android:theme="@android:style/Theme.Material.Light.NoActionBar">
               <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden">
                 <intent-filter>
                   <action android:name="android.intent.action.MAIN"/>
@@ -66,20 +75,72 @@ jobs:
           package ru.reshala.app;
           import android.Manifest;
           import android.app.Activity;
+          import android.app.ActivityManager;
+          import android.content.Context;
           import android.content.Intent;
           import android.net.Uri;
           import android.os.Bundle;
+          import android.webkit.JavascriptInterface;
           import android.webkit.PermissionRequest;
           import android.webkit.ValueCallback;
           import android.webkit.WebChromeClient;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
+          import com.google.mediapipe.tasks.genai.llminference.LlmInference;
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import org.json.JSONObject;
           public class MainActivity extends Activity {
             private WebView web;
             private ValueCallback<Uri[]> cb;
+            private LlmInference llm;
+            private File modelFile;
+            private void js(final String code) {
+              web.post(new Runnable() { public void run() { web.evaluateJavascript(code, null); } });
+            }
+            class Bridge {
+              @JavascriptInterface public boolean ready() {
+                return modelFile.exists() && modelFile.length() > 100000000L;
+              }
+              @JavascriptInterface public void pickModel() {
+                runOnUiThread(new Runnable() { public void run() {
+                  Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  i.addCategory(Intent.CATEGORY_OPENABLE);
+                  i.setType("*/*");
+                  startActivityForResult(i, 3);
+                } });
+              }
+              @JavascriptInterface public void ask(final String prompt) {
+                new Thread(new Runnable() { public void run() {
+                  String out = "";
+                  try {
+                    if (llm == null) {
+                      if (!ready()) { js("window.__aiDone('')"); return; }
+                      ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+                      ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                      am.getMemoryInfo(mi);
+                      if (mi.totalMem < 3000000000L) { js("window.__aiDone('')"); return; }
+                      LlmInference.LlmInferenceOptions o = LlmInference.LlmInferenceOptions.builder()
+                        .setModelPath(modelFile.getAbsolutePath())
+                        .setMaxTokens(768)
+                        .build();
+                      llm = LlmInference.createFromOptions(MainActivity.this, o);
+                    }
+                    String full = "<|im_start|>system\nТы точный помощник по школьной математике.<|im_end|>\n<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+                    out = llm.generateResponse(full);
+                  } catch (Throwable e) {
+                    out = "";
+                  }
+                  js("window.__aiDone(" + JSONObject.quote(out == null ? "" : out) + ")");
+                } }).start();
+              }
+            }
             @Override protected void onCreate(Bundle b) {
               super.onCreate(b);
+              modelFile = new File(getFilesDir(), "model.task");
               requestPermissions(new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO}, 2);
               web = new WebView(this);
               setContentView(web);
@@ -87,6 +148,7 @@ jobs:
               s.setJavaScriptEnabled(true);
               s.setDomStorageEnabled(true);
               s.setAllowFileAccess(true);
+              web.addJavascriptInterface(new Bridge(), "AndroidAI");
               web.setWebViewClient(new WebViewClient());
               web.setWebChromeClient(new WebChromeClient() {
                 @Override public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> c, FileChooserParams p) {
@@ -106,6 +168,26 @@ jobs:
               if (rc == 1 && cb != null) {
                 cb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, d));
                 cb = null;
+              }
+              if (rc == 3 && res == RESULT_OK && d != null && d.getData() != null) {
+                final Uri u = d.getData();
+                js("window.__aiStatus('Копирую модель, подождите…')");
+                new Thread(new Runnable() { public void run() {
+                  try {
+                    InputStream in = getContentResolver().openInputStream(u);
+                    OutputStream o = new FileOutputStream(modelFile);
+                    byte[] buf = new byte[1 << 20];
+                    int n;
+                    while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
+                    o.close();
+                    in.close();
+                    llm = null;
+                    js("window.__aiReady(true)");
+                  } catch (Exception e) {
+                    modelFile.delete();
+                    js("window.__aiReady(false)");
+                  }
+                } }).start();
               }
             }
             @Override public void onBackPressed() {
